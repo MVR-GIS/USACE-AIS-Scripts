@@ -1,0 +1,257 @@
+Public alpha As Integer
+Dim num As Integer
+
+Sub ChangeUpData()
+    If alpha = 0 Then
+        MsgBox "Please toggle between the rivers before proceeding"
+        Exit Sub
+    End If
+    
+    num = Sheets("NTRP").Range("B5")
+    Sheets("NTRP").Range("C8").ClearContents
+    Sheets("NTRP").Range("C6") = Sheets("Gage Data").Cells(num, alpha)
+    Sheets("NTRP").Range("C7") = Sheets("Gage Data").Cells(num, (alpha + 1))
+    Sheets("NTRP").Range("C10") = Sheets("Gage Data").Cells(num, (alpha + 2))
+End Sub
+Sub ChangeLowData()
+    If alpha = 0 Then
+        MsgBox "Please toggle between the rivers before proceeding"
+        Exit Sub
+    End If
+
+    num = Sheets("NTRP").Range("E5")
+    Sheets("NTRP").Range("F8").ClearContents
+    Sheets("NTRP").Range("F6") = Sheets("Gage Data").Cells(num, alpha)
+    Sheets("NTRP").Range("F7") = Sheets("Gage Data").Cells(num, (alpha + 1))
+    Sheets("NTRP").Range("F10") = Sheets("Gage Data").Cells(num, (alpha + 2))
+End Sub
+Sub ClearFields()
+    Sheets("NTRP").Range("B5,E5") = "1"
+    Sheets("NTRP").Range("C6:C8,F6:F8,E13:F13,H13:I13,C10,F10").ClearContents
+    Sheets("NTRP").Range("C8").Activate
+End Sub
+Sub ILLW_Option_Click()
+    If Sheets("NTRP").Range("C5") = "1" Then
+        Sheets("NTRP").Shapes("Drop Down 7").ControlFormat.ListFillRange = "'Gage Data'!$A$1:$A$65"
+        Sheets("NTRP").Shapes("Drop Down 8").ControlFormat.ListFillRange = "'Gage Data'!$A$1:$A$65"
+        ClearFields
+        Let alpha = 2
+    End If
+End Sub
+Sub MISS_Option_Click()
+    If Sheets("NTRP").Range("C5") = "2" Then
+        Sheets("NTRP").Shapes("Drop Down 7").ControlFormat.ListFillRange = "'Gage Data'!$E$1:$E$65"
+        Sheets("NTRP").Shapes("Drop Down 8").ControlFormat.ListFillRange = "'Gage Data'!$E$1:$E$65"
+        ClearFields
+        Let alpha = 6
+    End If
+End Sub
+Sub getRiverGages_v1()
+
+'
+' getRiverGages_v1 Macro
+' Author: Ryan Benac EC-GI CEMVR
+'
+    'Get UPPER GAGE URL value
+    
+    Dim var As String
+    
+    'Get URL from box in excel sheet
+    Sheets("NTRP").Select
+    upper_var = Range("C10").Value
+    lower_val = Range("F10").Value
+    
+    'End macro if not a URL
+    If upper_var = "Not on Rivergages.com" Or upper_var = "Manual Reading Only" Then
+        MsgBox "Reading unavailable. " & upper_var
+        Exit Sub
+    End If
+    If lower_val = "Not on Rivergages.com" Or lower_val = "Manual Reading Only" Then
+        MsgBox "Reading unavailable. " & lower_val
+        Exit Sub
+    End If
+    
+    'Format URL correctly for Excel
+    upper_var = """" & upper_var & """"
+    lower_val = """" & lower_val & """"
+    
+    'MsgBox "URL is " & var
+    
+    'Delete table if exists and create a new one
+    'For Each ws In Worksheets
+    '    If ws.Name = "RG_LOWER_DATA" Then
+    '        Application.DisplayAlerts = False
+    '        Sheets("RG_LOWER_DATA").Delete
+    '        Application.DisplayAlerts = True
+    '    End If
+    'Next
+
+    'Sheets.Add(After:=Sheets(Sheets.Count)).Name = "RG_LOWER_DATA"
+    
+    'Delete Queries
+    Dim q As WorkbookQuery
+    For Each q In ActiveWorkbook.Queries
+        If q.Name = "RG_LOWER" Then
+            Application.DisplayAlerts = False
+            q.Delete
+            Application.DisplayAlerts = True
+        End If
+    Next
+    
+    For Each q In ActiveWorkbook.Queries
+        If q.Name = "RG_UPPER" Then
+            Application.DisplayAlerts = False
+            q.Delete
+            Application.DisplayAlerts = True
+        End If
+    Next
+    
+    Sheets("RG_DATA").Select
+    
+    'just in case because the last lines dont always delete
+    Range("$A$2:$K$100").Select
+    Selection.ClearContents
+    
+    Range("$M$2:$W$100").Select
+    Selection.ClearContents
+    
+    Sheets("RG_DATA").Select
+    
+   
+    'query upper data from the given URL
+    ActiveWorkbook.Queries.Add Name:="RG_UPPER", Formula:= _
+        "let" & Chr(13) & "" & Chr(10) & "    Source = Web.Page(Web.Contents(" & upper_var & "))," & Chr(13) & "" & Chr(10) & "    Data0 = Source{0}[Data]," & Chr(13) & "" & Chr(10) & "    #""Changed Type"" = Table.TransformColumnTypes(Data0,{{""Column1"", type text}, {""Column2"", type text}})," & Chr(13) & "" & Chr(10) & "    #""Removed Top Rows"" = Table.Skip(#""Changed Type"",3)," & Chr(13) & "" & Chr(10) & "    #""Promoted Headers"" = Tab" & _
+        "le.PromoteHeaders(#""Removed Top Rows"", [PromoteAllScalars=true])," & Chr(13) & "" & Chr(10) & "    #""Changed Type1"" = Table.TransformColumnTypes(#""Promoted Headers"",{{""Date / Time"", type text}, {""Elevation (Ft)"", type text}})" & Chr(13) & "" & Chr(10) & "in" & Chr(13) & "" & Chr(10) & "    #""Changed Type1"""
+    
+    With ActiveSheet.ListObjects.Add(SourceType:=0, Source:= _
+        "OLEDB;Provider=Microsoft.Mashup.OleDb.1;Data Source=$Workbook$;Location=""RG_UPPER"";Extended Properties=""""" _
+        , Destination:=Range("'RG_DATA'!$A$2")).QueryTable
+        .CommandType = xlCmdSql
+        .CommandText = Array("SELECT * FROM [RG_UPPER]")
+        .RowNumbers = False
+        .FillAdjacentFormulas = False
+        .PreserveFormatting = True
+        .RefreshOnFileOpen = False
+        .BackgroundQuery = True
+        .RefreshStyle = xlInsertDeleteCells
+        .SavePassword = False
+        .SaveData = True
+        .AdjustColumnWidth = True
+        .RefreshPeriod = 0
+        .PreserveColumnInfo = True
+        .ListObject.DisplayName = "RG_UPPER"
+        .Refresh BackgroundQuery:=False
+    End With
+    
+    
+    'query lower data from the given URL
+    ActiveWorkbook.Queries.Add Name:="RG_LOWER", Formula:= _
+        "let" & Chr(13) & "" & Chr(10) & "    Source = Web.Page(Web.Contents(" & lower_val & "))," & Chr(13) & "" & Chr(10) & "    Data0 = Source{0}[Data]," & Chr(13) & "" & Chr(10) & "    #""Changed Type"" = Table.TransformColumnTypes(Data0,{{""Column1"", type text}, {""Column2"", type text}})," & Chr(13) & "" & Chr(10) & "    #""Removed Top Rows"" = Table.Skip(#""Changed Type"",3)," & Chr(13) & "" & Chr(10) & "    #""Promoted Headers"" = Tab" & _
+        "le.PromoteHeaders(#""Removed Top Rows"", [PromoteAllScalars=true])," & Chr(13) & "" & Chr(10) & "    #""Changed Type1"" = Table.TransformColumnTypes(#""Promoted Headers"",{{""Date / Time"", type text}, {""Elevation (Ft)"", type text}})" & Chr(13) & "" & Chr(10) & "in" & Chr(13) & "" & Chr(10) & "    #""Changed Type1"""
+     'ActiveWorkbook.Worksheets.Add.Name = "RG_LOWER_DATA"
+    With ActiveSheet.ListObjects.Add(SourceType:=0, Source:= _
+        "OLEDB;Provider=Microsoft.Mashup.OleDb.1;Data Source=$Workbook$;Location=""RG_LOWER"";Extended Properties=""""" _
+        , Destination:=Range("'RG_DATA'!$M$2")).QueryTable
+        .CommandType = xlCmdSql
+        .CommandText = Array("SELECT * FROM [RG_LOWER]")
+        .RowNumbers = False
+        .FillAdjacentFormulas = False
+        .PreserveFormatting = True
+        .RefreshOnFileOpen = False
+        .BackgroundQuery = True
+        .RefreshStyle = xlInsertDeleteCells
+        .SavePassword = False
+        .SaveData = True
+        .AdjustColumnWidth = True
+        .RefreshPeriod = 0
+        .PreserveColumnInfo = True
+        .ListObject.DisplayName = "RG_LOWER"
+        .Refresh BackgroundQuery:=False
+    End With
+   
+    'Copy over the most recent data from the data table to ntrp
+    Sheets("RG_DATA").Select
+    Range("B3").Select
+    Selection.Copy
+    Sheets("NTRP").Select
+    Range("C8").Select
+    ActiveSheet.Paste
+    Sheets("RG_DATA").Select
+    Range("N3").Select
+    Selection.Copy
+    Sheets("NTRP").Select
+    Range("F8").Select
+    ActiveSheet.Paste
+    Range("C8").Select
+    Application.CutCopyMode = False
+    Selection.ClearFormats
+    Range("F8").Select
+    Application.CutCopyMode = False
+    Selection.ClearFormats
+    
+    ' Unlink to keep offnetwork version of recent readings
+    Sheets("RG_DATA").Select
+    Range("C2").Select
+    ActiveSheet.ListObjects("RG_LOWER").Unlink
+    ActiveSheet.ListObjects("RG_UPPER").Unlink
+    
+    Sheets("NTRP").Select
+    
+    Range("C7").Select
+    Selection.Copy
+    Range("C8").Select
+    Selection.PasteSpecial Paste:=xlPasteFormats
+    Application.CutCopyMode = False
+
+    Range("F7").Select
+    Selection.Copy
+    Range("F8").Select
+    Selection.PasteSpecial Paste:=xlPasteFormats
+    Application.CutCopyMode = False
+    
+    'Reselect main sheet so they end on the same sheet they started on
+    Sheets("NTRP").Select
+    Range("H10").Select
+    
+End Sub
+
+Public primary As Integer
+Public secondary As Integer
+
+Sub Converter1()
+    If Sheets("Elevation Converter").Range("C8") = "1" Or Sheets("Elevation Converter").Range("I8") = "1" Then      ' Check if Datum is selected
+        Sheets("Elevation Converter").Range("F12") = ""                                                             ' Empty conversion factor with no Datum
+        Exit Sub
+    End If
+    
+    primary = Sheets("Elevation Converter").Range("C8") + "64"                                                      ' Set Conversion Table Row from Datum selection
+    secondary = Sheets("Elevation Converter").Range("I8")                                                           ' Set Conversion Table Col from Datum selection
+    Sheets("Elevation Converter").Range("F12") = Sheets("GAGE ZERO DATA").Cells(primary, secondary)                 ' Set conversion factor from Converstion Table
+
+End Sub
+
+Sub Converter2()
+ If Sheets("Elevation Converter").Range("I8") = "1" Or Sheets("Elevation Converter").Range("C8") = "1" Then         ' Check if Datum is selected
+        Sheets("Elevation Converter").Range("F12") = ""                                                             ' Empty Conversion factor with no Datum
+        Exit Sub
+    End If
+    
+    primary = Sheets("Elevation Converter").Range("C8") + "64"                                                      ' Set Conversion Table Row from Datum selection
+    secondary = Sheets("Elevation Converter").Range("I8")                                                           ' Set Conversion Table Col from Datum selection
+    Sheets("Elevation Converter").Range("F12") = Sheets("GAGE ZERO DATA").Cells(primary, secondary)                 ' Set Conversion factor from Converstion Table
+
+End Sub
+
+Sub Swap()
+    Dim register As Integer
+    
+    Sheets("Elevation Converter").Range("C9") = Sheets("Elevation Converter").Range("H9")               ' Copy converted value
+    
+    register = Sheets("Elevation Converter").Range("I8")                                                ' Store Datum 2 to swap
+    Sheets("Elevation Converter").Range("I8") = Sheets("Elevation Converter").Range("C8")               ' Copy Datum 1 on Datum 2
+    Sheets("Elevation Converter").Range("C8") = register                                                ' Copy Datum 2 on Datum 1
+    Converter1
+    
+End Sub
+
+
