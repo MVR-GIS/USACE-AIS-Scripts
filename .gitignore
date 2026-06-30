@@ -1,0 +1,38 @@
+ProjNet DrChecks/comments/
+EMS/Update Resource Bios/LOGS/
+ProjNet DrChecks/__pycache__/
+ProjNet DrChecks/logs/
+ProjNet DrChecks/downloads/
+ProjNet DrChecks/.credentials.enc
+CEBIS/CEBIS_EXPORT.csv
+CEBIS/CEBIS_EXPORT.geojson
+config.json
+CEFMS/export_given_session.py
+CEFMS/DATA/
+EMS/chief.json
+EMS/ems_session.json
+EMS/PEP.json
+EMS/percent_complete.json
+EMS/percenvr_complete.json
+EMS/Bulk Insert Tasks to EMS/Copy of CR-FRM EMS Products w P6 Tasks.xlsx
+EMS/Bulk Insert Tasks to EMS/NEW Compiled Worksheet of CR-FRM EMS Products w P6 Tasks Categorized.xlsx
+EMS/Bulk Insert Tasks to EMS/TEST_DATASETS.xlsx
+EMS/Update Resource Bios/CERCAP_EXPORT.csv
+EMS/Update Resource Bios/ems_session.json
+EMS/Update Resource Bios/usace_sections.csv
+EMS/Update Resource Bios/usace_sections_CEMVR.xlsx
+EMS/Update Resource Bios/usace_sections_CEMVR.csv
+HSS/HSS_EXPORT.csv
+MIDAS/.RData
+MIDAS/.Rhistory
+MIDAS/MIDAS_instruments_mvr_BACKUP_DATA.geojson
+MIDAS/OUTPUT GEOJSON/
+OpenGround/OpenGround/.RData
+OpenGround/OpenGround/.Rhistory
+OpenGround/OpenGround ECHQ Sediment Samples/.RData
+OpenGround/OpenGround ECHQ Sediment Samples/.Rhistory
+OpenGround/OpenGround ECHQ Sediment Samples/NO CREDENTIALS/.Rhistory
+OpenGround/OpenGround ECHQ Sediment Samples/OUTPUT GEOJSON/openGround_ECHQ_sediment_data.geojson
+OpenGround/OpenGround Site Characterization Borings/.Rhistory
+OpenGround/OpenGround Site Characterization Borings/OUTPUT_GEOJSON/
+OpenGround/OpenGround/OUTPUT GEOJSON/
