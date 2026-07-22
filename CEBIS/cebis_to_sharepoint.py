@@ -213,7 +213,7 @@ def main():
     import json
 
     # Load configuration
-    config_path = "C:/Workspace/GIT/USACE-AIS-Scripts/Weekly_Extractions_Backups.bat"
+    config_path = "C:/Workspace/GIT/USACE-AIS-Scripts/config.json"
 
     with open(config_path, 'r') as f:
         config = json.load(f)

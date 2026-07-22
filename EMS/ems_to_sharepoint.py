@@ -33,7 +33,7 @@ import requests
 import json
 
 # Load configuration
-config_path = "C:/Workspace/GIT/projectwise/config.json"
+config_path = "C:/Workspace/GIT/USACE-AIS-Scripts/config.json"
 
 with open(config_path, 'r') as f:
     config = json.load(f)
@@ -101,8 +101,8 @@ EMAIL_ADDRESS = config['sharepoint_username']
 
 # Define URLs and file paths
 urls_and_paths = [
-    ("https://ems.sec.usace.army.mil/api/rest/CHIEFS/CEMVR", "C:\\Workspace\\AUTOMATED_SCRIPTS\\EMS\\chief.json"),
-    ("https://ems.sec.usace.army.mil/api/rest/PEP_DATA/CEMVR", "C:\\Workspace\\AUTOMATED_SCRIPTS\\EMS\\pep.json"),
+    # ("https://ems.sec.usace.army.mil/api/rest/CHIEFS/CEMVR", "C:\\Workspace\\AUTOMATED_SCRIPTS\\EMS\\chief.json"),
+    ("https://ems.sec.usace.army.mil/api/rest/PEP_DATA/CEMVR", "C:\\Workspace\\AUTOMATED_SCRIPTS\\EMS\\pep.json")
     # ("https://ems.sec.usace.army.mil/api/REST/PERCENT_STATUS/CEMVR", "C:\\Workspace\\AUTOMATED_SCRIPTS\\EMS\\percent_complete.json"),
 ]
 

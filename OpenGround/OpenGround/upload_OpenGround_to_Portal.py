@@ -40,7 +40,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError, Page
 
 # Add the A_MODULES directory to system path for custom module imports
-MODULES_PATH = r'C:\Workspace\AUTOMATED_SCRIPTS\A_MODULES'
+MODULES_PATH = r'C:\Workspace\GIT\USACE-AIS-Scripts\A_Modules'
 if MODULES_PATH not in sys.path:
     sys.path.insert(0, MODULES_PATH)
 

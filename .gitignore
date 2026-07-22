@@ -37,3 +37,9 @@ OpenGround/OpenGround Site Characterization Borings/.Rhistory
 OpenGround/OpenGround Site Characterization Borings/OUTPUT_GEOJSON/
 OpenGround/OpenGround/OUTPUT GEOJSON/
 Map Network Drives.lnk
+A_Modules/__pycache__/
+ProjNet_DrChecks/comments/
+ProjNet_DrChecks/logs/
+ProjNet_DrChecks/downloads/
+ProjNet_DrChecks/__pycache__/
+ProjNet_DrChecks/.credentials.enc

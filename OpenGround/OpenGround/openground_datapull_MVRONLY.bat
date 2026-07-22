@@ -18,7 +18,7 @@
 set "rscriptPath=C:\Users\b5edgr9b\AppData\Local\Programs\R\R-4.5.0\bin\x64\Rscript.exe"
 
 :: Full path for the R script to run
-set "rScriptFile=C:\Workspace\AUTOMATED_SCRIPTS\OpenGround\openGround_datapull.R"
+set "rScriptFile=C:\Workspace\GIT\USACE-AIS-Scripts\OpenGround\OpenGround\openGround_datapull.R"
 
 :: Run the R script
 "%rscriptPath%" "%rScriptFile%"
@@ -28,7 +28,7 @@ REM Set the path to your Python interpreter (replace if needed)
 set PYTHON_PATH="C:\Users\b5edgr9b\AppData\Local\Programs\Python\Python313\python.exe"
 
 REM Set the working directory to the script's location
-cd /D "C:\Workspace\AUTOMATED_SCRIPTS\OpenGround"
+cd /D "C:\Workspace\GIT\USACE-AIS-Scripts\OpenGround\OpenGround"
 
 REM Activate the virtual environment (if you're using one)
 if exist .\.venv\Scripts\activate.bat (
@@ -46,3 +46,4 @@ if exist .\.venv\Scripts\deactivate.bat (
 
 ::explorer "C:\Workspace\AUTOMATED_SCRIPTS\OpenGround\OUTPUT GEOJSON"
 ::start chrome "https://geoportal.mvr.usace.army.mil/b5portal/home/item.html?id=1d30a71e4357409a96afb8e9695b0db7"
+pause

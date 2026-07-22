@@ -2,7 +2,7 @@
 title HSS to SharePoint Automation
 
 REM Set the working directory to the script's location
-cd /D "C:\Workspace\AUTOMATED_SCRIPTS\HSS"
+cd /D C:\Workspace\GIT\USACE-AIS-Scripts\HSS
 
 REM Set path to venv Python
 set VENV_PYTHON="C:\Users\b5edgr9b\.venv\Scripts\python.exe"

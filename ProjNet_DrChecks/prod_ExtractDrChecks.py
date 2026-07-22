@@ -57,7 +57,7 @@ from SharePointUpload import upload_to_sharepoint
 # ============================================================================
 
 # Define working directory and file paths
-WORKING_DIR = r"C:\Workspace\AUTOMATED_SCRIPTS\DrChecks_ProjNet"
+WORKING_DIR = r"C:\Workspace\GIT\USACE-AIS-Scripts\ProjNet_DrChecks"
 CREDS_FILE = os.path.join(WORKING_DIR, ".credentials.enc")
 KEY_FILE = os.path.join(WORKING_DIR, ".key.enc")
 DOWNLOAD_FOLDER = os.path.join(WORKING_DIR, "downloads")
@@ -90,8 +90,8 @@ VERBOSE_OUTPUT = False  # Set to True to see every project download
 PROGRESS_INTERVAL = 10  # Show progress every N projects (when VERBOSE_OUTPUT is False)
 
 # Browser display configuration
-HEADLESS_INITIAL_DOWNLOADS = True  # Set to False to see browser for initial downloads
-HEADLESS_COMMENTS_DOWNLOAD = True  # Set to False to see browser for comment downloads
+HEADLESS_INITIAL_DOWNLOADS = False  # Set to False to see browser for initial downloads
+HEADLESS_COMMENTS_DOWNLOAD = False  # Set to False to see browser for comment downloads
                                    # Note: SharePoint upload ALWAYS shows browser (not configurable)
 
 # Date filtering configuration

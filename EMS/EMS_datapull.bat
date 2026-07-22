@@ -2,7 +2,7 @@
 echo Running ems_to_sharepoint.py...
 
 REM Set the working directory to the script's location
-cd /d C:\Workspace\AUTOMATED_SCRIPTS\EMS
+cd /d C:\Workspace\GIT\USACE-AIS-Scripts\EMS
 
 REM Set path to venv Python
 set VENV_PYTHON="C:\Users\b5edgr9b\.venv\Scripts\python.exe"
