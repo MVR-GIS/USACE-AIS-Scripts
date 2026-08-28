@@ -26,6 +26,9 @@ echo.
 echo Opening ArcGIS Portal (UCOP)...
 start chrome "https://arcportal-ucop-corps.usace.army.mil/s0portal/home/content.html#my"
 
+echo Opening JECOP...
+start chrome "https://jecop.usace.army.mil/portal/home/"
+
 echo Opening Bentley OpenGround Portal...
 start chrome "https://portal.openground.bentley.com/clouds/eastus/570c1f2b-aed1-4791-a20b-4b8ac8cdd2c8"
 
