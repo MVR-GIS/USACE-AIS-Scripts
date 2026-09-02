@@ -1,7 +1,6 @@
 """
 ================================================================================
 ProjNet Data Extraction Script - MULTI-TAB VERSION
-Bypass menlo proxy settings
 ================================================================================
 Uses threading with single browser session (multiple tabs)
 ================================================================================
@@ -74,7 +73,7 @@ SITE_OFFICE_VALUE = "1107"
 SITE_OFFICE_NAME = "MVR Rock Island District"
 
 # Performance configuration
-MAX_PARALLEL_TABS = 6  # Number of parallel tabs in same browser
+MAX_PARALLEL_TABS = 1  # Number of parallel tabs in same browser
 DOWNLOAD_TIMEOUT = 180000  # 180 seconds (3 minutes) for downloads
 PAGE_LOAD_TIMEOUT = 120000  # 120 seconds (2 minutes) for page loads
 TAB_STARTUP_DELAY = 2  # 2 seconds between starting each tab
@@ -85,20 +84,17 @@ RETRY_DELAY = 5  # Seconds to wait between retries
 
 
 # Output configuration
-ENABLE_LOGGING = True  # Set to True to enable console logging
-VERBOSE_OUTPUT = False  # Set to True to see every project download
+VERBOSE_OUTPUT = True  # Set to True to see every project download
 PROGRESS_INTERVAL = 10  # Show progress every N projects (when VERBOSE_OUTPUT is False)
 
 # Browser display configuration
 HEADLESS_INITIAL_DOWNLOADS = False  # Set to False to see browser for initial downloads
 HEADLESS_COMMENTS_DOWNLOAD = False  # Set to False to see browser for comment downloads
-BYPASS_SYSTEM_PROXY = True  # Test direct Chromium networking without Menlo proxy settings
-ENABLE_NETWORK_CAPTURE = False  # Set to True to write per-project network traces
 
 # Testing configuration
 # True = skip Phase 1 and use files already present in the downloads folder.
 # Phase 2 requires downloads/ALL_PROJECTS.csv to already exist.
-SKIP_INITIAL_DOWNLOADS = False
+SKIP_INITIAL_DOWNLOADS = True
 
 # Date filtering configuration
 YEARS_TO_INCLUDE = 10  # Number of years to look back for projects
@@ -118,7 +114,7 @@ def timestamp():
 
 def log(message, force=False):
     """Print message with timestamp."""
-    if ENABLE_LOGGING and (force or VERBOSE_OUTPUT):
+    if force or VERBOSE_OUTPUT:
         print(f"[{timestamp()}] {message}")
 
 def format_time_estimate(seconds):
@@ -441,33 +437,6 @@ def normalize_comments_download_url(raw_href):
         ""
     ))
 
-def sanitize_network_headers(headers):
-    """Remove authentication material before writing network diagnostics."""
-    sensitive_headers = {
-        "authorization",
-        "cookie",
-        "proxy-authorization",
-        "set-cookie"
-    }
-
-    return {
-        name: value
-        for name, value in headers.items()
-        if name.lower() not in sensitive_headers
-    }
-
-def write_network_log(network_log_path, network_events):
-    """Write one JSON object per network event for easy filtering."""
-    try:
-        with open(network_log_path, "w", encoding="utf-8") as log_file:
-            for event in network_events:
-                log_file.write(json.dumps(event, default=str) + "\n")
-    except Exception as error:
-        log(
-            f"    Network trace could not be written: {error}",
-            force=True
-        )
-
 async def fetch_report_bytes(page, report_link, download_url, pkey_project):
     """Fetch the report directly, falling back to Menlo's original download."""
     fetch_result = await page.evaluate(
@@ -526,13 +495,6 @@ async def fetch_report_bytes(page, report_link, download_url, pkey_project):
         await popup_page.wait_for_load_state(
             "domcontentloaded",
             timeout=60000
-        )
-
-        await popup_page.locator(
-            "#doc-status-toolbar-av-scan-clean"
-        ).wait_for(
-            state="visible",
-            timeout=120000
         )
 
         async with popup_page.expect_download(timeout=60000) as download_info:
@@ -594,10 +556,6 @@ async def download_single_project_async(
             page = None
             popup_page = None
             temp_xlsx_path = None
-            network_events = []
-            network_capture_start = None
-            network_handlers = []
-            network_body_tasks = []
 
             try:
                 # ============================================================
@@ -640,109 +598,6 @@ async def download_single_project_async(
                     state="visible",
                     timeout=30000
                 )
-
-                if ENABLE_NETWORK_CAPTURE:
-                    network_capture_start = time.monotonic()
-
-                    def capture_request(request):
-                        network_events.append({
-                            "event": "request",
-                            "elapsed_ms": round(
-                                (time.monotonic() - network_capture_start) * 1000,
-                                1
-                            ),
-                            "method": request.method,
-                            "url": request.url,
-                            "resource_type": request.resource_type,
-                            "headers": sanitize_network_headers(request.headers),
-                            "post_data": request.post_data
-                        })
-
-                    async def capture_response_body(response):
-                        if "safeview-fileserv" not in response.url:
-                            return
-
-                        content_type = response.headers.get(
-                            "content-type",
-                            ""
-                        ).lower()
-
-                        if (
-                            "json" not in content_type and
-                            "text" not in content_type
-                        ):
-                            return
-
-                        try:
-                            body = await response.text()
-                            network_events.append({
-                                "event": "response_body",
-                                "elapsed_ms": round(
-                                    (time.monotonic() - network_capture_start) * 1000,
-                                    1
-                                ),
-                                "url": response.url,
-                                "body": body[:50000]
-                            })
-                        except Exception as error:
-                            network_events.append({
-                                "event": "response_body_error",
-                                "elapsed_ms": round(
-                                    (time.monotonic() - network_capture_start) * 1000,
-                                    1
-                                ),
-                                "url": response.url,
-                                "error": str(error)
-                            })
-
-                    def capture_response(response):
-                        network_events.append({
-                            "event": "response",
-                            "elapsed_ms": round(
-                                (time.monotonic() - network_capture_start) * 1000,
-                                1
-                            ),
-                            "status": response.status,
-                            "url": response.url,
-                            "headers": sanitize_network_headers(response.headers),
-                            "request_method": response.request.method
-                        })
-
-                        network_body_tasks.append(
-                            asyncio.create_task(capture_response_body(response))
-                        )
-
-                    def capture_request_failed(request):
-                        network_events.append({
-                            "event": "requestfailed",
-                            "elapsed_ms": round(
-                                (time.monotonic() - network_capture_start) * 1000,
-                                1
-                            ),
-                            "method": request.method,
-                            "url": request.url,
-                            "failure": request.failure
-                        })
-
-                    network_handlers = [
-                        ("request", capture_request),
-                        ("response", capture_response),
-                        ("requestfailed", capture_request_failed)
-                    ]
-
-                    for event_name, handler in network_handlers:
-                        context.on(event_name, handler)
-
-                    network_log_path = os.path.join(
-                        LOGS_FOLDER,
-                        f"comments_network_{pkey_project}_attempt_{attempt + 1}.jsonl"
-                    )
-
-                    log(
-                        f"    [{pkey_project}] Network capture started: "
-                        f"{network_log_path}",
-                        force=True
-                    )
 
                 await run_report_button.click(timeout=30000)
 
@@ -1310,21 +1165,6 @@ async def download_single_project_async(
                 await asyncio.sleep(RETRY_DELAY)
 
             finally:
-                for event_name, handler in network_handlers:
-                    try:
-                        context.remove_listener(event_name, handler)
-                    except Exception:
-                        pass
-
-                if network_body_tasks:
-                    await asyncio.gather(
-                        *network_body_tasks,
-                        return_exceptions=True
-                    )
-
-                if network_capture_start is not None:
-                    write_network_log(network_log_path, network_events)
-
                 if popup_page:
                     try:
                         await popup_page.close()
@@ -1944,8 +1784,7 @@ def main():
             )
 
             browser = p.chromium.launch(
-                headless=HEADLESS_INITIAL_DOWNLOADS,
-                args=["--no-proxy-server"] if BYPASS_SYSTEM_PROXY else []
+                headless=HEADLESS_INITIAL_DOWNLOADS
             )
 
             context = browser.new_context(accept_downloads=True)
@@ -2056,10 +1895,7 @@ def main():
         async def run_async_downloads():
             async with async_playwright() as p:
                 log(f"→ Launching browser (headless={HEADLESS_COMMENTS_DOWNLOAD})...", force=True)
-                browser = await p.chromium.launch(
-                    headless=HEADLESS_COMMENTS_DOWNLOAD,
-                    args=["--no-proxy-server"] if BYPASS_SYSTEM_PROXY else []
-                )
+                browser = await p.chromium.launch(headless=HEADLESS_COMMENTS_DOWNLOAD)
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
                 

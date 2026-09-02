@@ -1,7 +1,6 @@
 """
 ================================================================================
 ProjNet Data Extraction Script - MULTI-TAB VERSION
-Bypass menlo proxy settings
 ================================================================================
 Uses threading with single browser session (multiple tabs)
 ================================================================================
@@ -37,11 +36,14 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.backends import default_backend
 
+import json
+
 # Load configuration
 config_path = "C:/Workspace/GIT/USACE-AIS-Scripts/config.json"
 
 with open(config_path, 'r') as f:
     config = json.load(f)
+
 
 # Add the A_MODULES directory to system path
 MODULES_PATH = config['modules_path']
@@ -80,25 +82,17 @@ PAGE_LOAD_TIMEOUT = 120000  # 120 seconds (2 minutes) for page loads
 TAB_STARTUP_DELAY = 2  # 2 seconds between starting each tab
 INTER_REQUEST_DELAY = 1  # 1 second between requests within a tab
 AVG_SECONDS_PER_PROJECT = 3  # Average time to download one project (for estimates)
-MAX_RETRIES = 1  # Maximum number of retry attempts for failed downloads
+MAX_RETRIES = 3  # Maximum number of retry attempts for failed downloads
 RETRY_DELAY = 5  # Seconds to wait between retries
 
-
 # Output configuration
-ENABLE_LOGGING = True  # Set to True to enable console logging
 VERBOSE_OUTPUT = False  # Set to True to see every project download
 PROGRESS_INTERVAL = 10  # Show progress every N projects (when VERBOSE_OUTPUT is False)
 
 # Browser display configuration
 HEADLESS_INITIAL_DOWNLOADS = False  # Set to False to see browser for initial downloads
 HEADLESS_COMMENTS_DOWNLOAD = False  # Set to False to see browser for comment downloads
-BYPASS_SYSTEM_PROXY = True  # Test direct Chromium networking without Menlo proxy settings
-ENABLE_NETWORK_CAPTURE = False  # Set to True to write per-project network traces
-
-# Testing configuration
-# True = skip Phase 1 and use files already present in the downloads folder.
-# Phase 2 requires downloads/ALL_PROJECTS.csv to already exist.
-SKIP_INITIAL_DOWNLOADS = False
+                                   # Note: SharePoint upload ALWAYS shows browser (not configurable)
 
 # Date filtering configuration
 YEARS_TO_INCLUDE = 10  # Number of years to look back for projects
@@ -117,8 +111,14 @@ def timestamp():
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 def log(message, force=False):
-    """Print message with timestamp."""
-    if ENABLE_LOGGING and (force or VERBOSE_OUTPUT):
+    """
+    Print message with timestamp.
+    
+    Args:
+        message: Message to print
+        force: If True, always print regardless of VERBOSE_OUTPUT setting
+    """
+    if force or VERBOSE_OUTPUT:
         print(f"[{timestamp()}] {message}")
 
 def format_time_estimate(seconds):
@@ -145,7 +145,7 @@ def format_elapsed_time(seconds):
         return f"{hours:.1f} hours ({minutes:.0f} minutes)"
 
 # ============================================================================
-# ENCRYPTION UTILITIES
+# ENCRYPTION UTILITIES (keep all your existing encryption functions)
 # ============================================================================
 
 def get_machine_id():
@@ -183,7 +183,7 @@ def get_machine_id():
                     break
         else:
             machine_id = f"{platform.node()}-{os.getlogin()}"
-    except Exception:
+    except Exception as e:
         try:
             machine_id = f"{platform.node()}-{platform.system()}-{os.getlogin()}"
         except:
@@ -221,7 +221,7 @@ def decrypt_data(encrypted_data):
     try:
         decrypted = fernet.decrypt(encrypted_data)
         return decrypted.decode()
-    except Exception:
+    except Exception as e:
         raise Exception(
             "Failed to decrypt credentials. This file may have been created "
             "on a different machine or the file is corrupted."
@@ -307,6 +307,7 @@ def parse_date(date_str):
     """Parse a date string to datetime object."""
     if pd.isna(date_str) or date_str == '' or date_str is None:
         return None
+    
     try:
         return pd.to_datetime(date_str)
     except:
@@ -407,960 +408,158 @@ class ProgressTracker:
 # ASYNC WORKER FUNCTION FOR MULTI-TAB DOWNLOADS WITH RETRY
 # ============================================================================
 
-import urllib.parse
-
-def normalize_comments_download_url(raw_href):
+async def download_single_project_async(context, project, tab_id, semaphore, progress_tracker):
     """
-    ProjNet may generate a relative download href that browsers resolve under
-    /projnet/binKornHome/. The actual download handler is under /binReport/.
+    Async worker function to download comments for a single project with retry logic.
+    Uses page.request.get with absolute URL evaluation to bypass Menlo Security.
     """
-    if not raw_href:
-        raise ValueError("Generated report link did not contain an href.")
-
-    parsed = urllib.parse.urlsplit(raw_href)
-
-    if not parsed.query:
-        raise ValueError(
-            f"Generated report link did not contain query parameters: {raw_href}"
-        )
-
-    query_values = urllib.parse.parse_qs(parsed.query)
-
-    if "file" not in query_values:
-        raise ValueError(
-            f"Generated report link did not contain a file parameter: {raw_href}"
-        )
-
-    # Keep the exact query string ProjNet generated, but force the correct
-    # ProjNet report-download path.
-    return urllib.parse.urlunsplit((
-        "https",
-        "www.projnet.org",
-        "/projnet/binReport/ATO_Reports/downloadReport.cfm",
-        parsed.query,
-        ""
-    ))
-
-def sanitize_network_headers(headers):
-    """Remove authentication material before writing network diagnostics."""
-    sensitive_headers = {
-        "authorization",
-        "cookie",
-        "proxy-authorization",
-        "set-cookie"
-    }
-
-    return {
-        name: value
-        for name, value in headers.items()
-        if name.lower() not in sensitive_headers
-    }
-
-def write_network_log(network_log_path, network_events):
-    """Write one JSON object per network event for easy filtering."""
-    try:
-        with open(network_log_path, "w", encoding="utf-8") as log_file:
-            for event in network_events:
-                log_file.write(json.dumps(event, default=str) + "\n")
-    except Exception as error:
-        log(
-            f"    Network trace could not be written: {error}",
-            force=True
-        )
-
-async def fetch_report_bytes(page, report_link, download_url, pkey_project):
-    """Fetch the report directly, falling back to Menlo's original download."""
-    fetch_result = await page.evaluate(
-        """async (url) => {
-            const response = await fetch(url, {
-                credentials: "include"
-            });
-
-            const contentType = response.headers.get(
-                "content-type"
-            ) || "";
-
-            if (!response.ok) {
-                return {
-                    ok: false,
-                    status: response.status,
-                    contentType: contentType
-                };
-            }
-
-            const bytes = new Uint8Array(await response.arrayBuffer());
-            let binary = "";
-            const chunkSize = 0x8000;
-
-            for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-                binary += String.fromCharCode(
-                    ...bytes.subarray(offset, offset + chunkSize)
-                );
-            }
-
-            return {
-                ok: true,
-                status: response.status,
-                contentType: contentType,
-                body: btoa(binary)
-            };
-        }""",
-        download_url
-    )
-
-    if fetch_result.get("ok"):
-        return base64.b64decode(fetch_result["body"])
-
-    log(
-        f"    [{pkey_project}] Direct fetch returned "
-        f"{fetch_result.get('status')} ({fetch_result.get('contentType', 'unknown')}); "
-        "using Menlo original download...",
-        force=True
-    )
-
-    async with page.expect_popup(timeout=30000) as popup_info:
-        await report_link.click()
-
-    popup_page = await popup_info.value
-    try:
-        await popup_page.wait_for_load_state(
-            "domcontentloaded",
-            timeout=60000
-        )
-
-        await popup_page.locator(
-            "#doc-status-toolbar-av-scan-clean"
-        ).wait_for(
-            state="visible",
-            timeout=120000
-        )
-
-        async with popup_page.expect_download(timeout=60000) as download_info:
-            await popup_page.locator("#download-menu-btn").click()
-            await popup_page.locator("#ori-download").click()
-
-        download_event = await download_info.value
-        download_path = await download_event.path()
-
-        if not download_path:
-            raise Exception("Menlo original download did not provide a file path.")
-
-        with open(download_path, "rb") as report_file:
-            report_bytes = report_file.read()
-
-        if not report_bytes:
-            raise Exception("Menlo original download returned an empty file.")
-
-        return report_bytes
-    finally:
-        await popup_page.close()
-
-async def download_single_project_async(
-    context,
-    project,
-    tab_id,
-    semaphore,
-    progress_tracker
-):
-    """
-    Download comments for one ProjNet project.
-
-    This uses normal browser link behavior after the project report is generated.
-
-    Outcomes:
-      - In-page fetch:
-          Read the generated XLSX response before browser navigation can be
-          intercepted by Menlo, convert it to CSV, mark success.
-      - Native browser download event:
-          Save XLSX, convert to CSV, mark success.
-      - Popup/new tab:
-          Save diagnostic HTML and screenshot, then mark the attempt failed.
-      - No link:
-          Treat as an empty report if the page says there is no data;
-          otherwise fail with the report-generation error.
-
-    This intentionally does not use the separate Playwright API request method
-    that returned IIS 404 for dynamic downloadReport.cfm report files.
-    """
-    pkey_project = str(project["PKEYPROJECT"])
-    project_id = str(project["PROJECTID"])
-    project_name = str(project["PROJECTNAME"])
-
-    # Preserve original staggered startup behavior.
+    pkey_project = project['PKEYPROJECT']
+    project_id = project['PROJECTID']
+    project_name = project['PROJECTNAME']
+    
+    # Stagger the startup of tabs to prevent overwhelming the server/session
     await asyncio.sleep(tab_id * TAB_STARTUP_DELAY)
-
-    async with semaphore:
+    
+    async with semaphore:  # Limit concurrent tabs
+        # Try up to MAX_RETRIES times
         for attempt in range(MAX_RETRIES):
             page = None
-            popup_page = None
-            temp_xlsx_path = None
-            network_events = []
-            network_capture_start = None
-            network_handlers = []
-            network_body_tasks = []
-
             try:
-                # ============================================================
-                # 1. Open the ProjNet All Comments Report page.
-                # ============================================================
+                # Create a new tab (page) in the existing context
                 page = await context.new_page()
                 page.set_default_timeout(PAGE_LOAD_TIMEOUT)
-
-                await page.goto(
-                    ALL_COMMENTS_REPORT_URL,
-                    wait_until="domcontentloaded",
-                    timeout=PAGE_LOAD_TIMEOUT
-                )
-
-                project_dropdown = page.locator(
-                    'select[name="selectProject"]'
-                )
-
-                await project_dropdown.wait_for(
-                    state="visible",
-                    timeout=60000
-                )
-
-                # ============================================================
-                # 2. Select the project and generate its report.
-                # ============================================================
-                await project_dropdown.select_option(
-                    value=pkey_project,
-                    timeout=30000
-                )
-
-                # Retain original short wait for page event processing.
-                await page.wait_for_timeout(500)
-
-                run_report_button = page.locator(
-                    'input[name="SubmitReport"][value="Run Report"]'
-                )
-
-                await run_report_button.wait_for(
-                    state="visible",
-                    timeout=30000
-                )
-
-                if ENABLE_NETWORK_CAPTURE:
-                    network_capture_start = time.monotonic()
-
-                    def capture_request(request):
-                        network_events.append({
-                            "event": "request",
-                            "elapsed_ms": round(
-                                (time.monotonic() - network_capture_start) * 1000,
-                                1
-                            ),
-                            "method": request.method,
-                            "url": request.url,
-                            "resource_type": request.resource_type,
-                            "headers": sanitize_network_headers(request.headers),
-                            "post_data": request.post_data
-                        })
-
-                    async def capture_response_body(response):
-                        if "safeview-fileserv" not in response.url:
-                            return
-
-                        content_type = response.headers.get(
-                            "content-type",
-                            ""
-                        ).lower()
-
-                        if (
-                            "json" not in content_type and
-                            "text" not in content_type
-                        ):
-                            return
-
-                        try:
-                            body = await response.text()
-                            network_events.append({
-                                "event": "response_body",
-                                "elapsed_ms": round(
-                                    (time.monotonic() - network_capture_start) * 1000,
-                                    1
-                                ),
-                                "url": response.url,
-                                "body": body[:50000]
-                            })
-                        except Exception as error:
-                            network_events.append({
-                                "event": "response_body_error",
-                                "elapsed_ms": round(
-                                    (time.monotonic() - network_capture_start) * 1000,
-                                    1
-                                ),
-                                "url": response.url,
-                                "error": str(error)
-                            })
-
-                    def capture_response(response):
-                        network_events.append({
-                            "event": "response",
-                            "elapsed_ms": round(
-                                (time.monotonic() - network_capture_start) * 1000,
-                                1
-                            ),
-                            "status": response.status,
-                            "url": response.url,
-                            "headers": sanitize_network_headers(response.headers),
-                            "request_method": response.request.method
-                        })
-
-                        network_body_tasks.append(
-                            asyncio.create_task(capture_response_body(response))
-                        )
-
-                    def capture_request_failed(request):
-                        network_events.append({
-                            "event": "requestfailed",
-                            "elapsed_ms": round(
-                                (time.monotonic() - network_capture_start) * 1000,
-                                1
-                            ),
-                            "method": request.method,
-                            "url": request.url,
-                            "failure": request.failure
-                        })
-
-                    network_handlers = [
-                        ("request", capture_request),
-                        ("response", capture_response),
-                        ("requestfailed", capture_request_failed)
-                    ]
-
-                    for event_name, handler in network_handlers:
-                        context.on(event_name, handler)
-
-                    network_log_path = os.path.join(
-                        LOGS_FOLDER,
-                        f"comments_network_{pkey_project}_attempt_{attempt + 1}.jsonl"
-                    )
-
-                    log(
-                        f"    [{pkey_project}] Network capture started: "
-                        f"{network_log_path}",
-                        force=True
-                    )
-
-                await run_report_button.click(timeout=30000)
-
-                # ============================================================
-                # 3. Wait for the report download link.
-                # ============================================================
-                download_selector = 'a[href*="downloadReport.cfm"]'
-
+                
+                # Navigate to All Comments Report page
+                await page.goto(ALL_COMMENTS_REPORT_URL, wait_until='domcontentloaded', timeout=PAGE_LOAD_TIMEOUT)
+                
+                # Wait for the select dropdown to be available
+                await page.wait_for_selector('select[name="selectProject"]', state='visible', timeout=60000)
+                
+                # Select the project
+                await page.select_option('select[name="selectProject"]', value=pkey_project, timeout=30000)
+                
+                # Click Run Report
+                await page.click('input[name="SubmitReport"][value="Run Report"]', timeout=10000)
+                
+                # Wait for the page to load the results
+                await page.wait_for_load_state("domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
+                
+                # Define the selector for the download link
+                # ProjNet links for this report usually contain the PKEYPROJECT in the href
+                selector = f'a[href*="{pkey_project}"]'
+                
                 try:
-                    await page.wait_for_function(
-                        """() => {
-                            const link = document.querySelector(
-                                'a[href*="downloadReport.cfm"]'
-                            );
+                    await page.wait_for_selector(selector, state="visible", timeout=60000)
+                except:
+                    # Fallback: try to find any link containing "downloadReport.cfm"
+                    selector = 'a[href*="downloadReport.cfm"]'
+                    await page.wait_for_selector(selector, state="visible", timeout=30000)
 
-                            if (!link) {
-                                return false;
-                            }
+                # --- MENLO BYPASS LOGIC ---
+                # Use the browser to resolve the ABSOLUTE URL. 
+                # This prevents 404 errors caused by incorrect relative path guessing.
+                full_url = await page.evaluate(f"document.querySelector('{selector}').href")
+                
+                if not full_url or 'http' not in full_url:
+                    raise Exception("Could not resolve a valid absolute URL for download")
 
-                            const href = link.getAttribute("href") || "";
-
-                            return (
-                                href.includes("downloadReport.cfm") &&
-                                href.includes("file=")
-                            );
-                        }""",
-                        timeout=90000
-                    )
-
-                except Exception:
-                    page_html = (await page.content()).lower()
-
-                    no_data_messages = [
-                        "no records found",
-                        "no comments found",
-                        "no data found",
-                        "0 records"
-                    ]
-
-                    if any(
-                        message in page_html
-                        for message in no_data_messages
-                    ):
-                        csv_path = os.path.join(
-                            COMMENTS_FOLDER,
-                            f"{pkey_project}.csv"
-                        )
-
-                        # Preserve empty-project behavior.
-                        with open(
-                            csv_path,
-                            "w",
-                            newline="",
-                            encoding="utf-8"
-                        ):
-                            pass
-
+                # Use the Request API to download the file bytes directly using the current session
+                response = await page.request.get(full_url)
+                
+                if response.status == 200:
+                    temp_xlsx_path = os.path.join(COMMENTS_FOLDER, f"{pkey_project}_temp.xlsx")
+                    
+                    # Write the raw bytes to a file
+                    body = await response.body()
+                    with open(temp_xlsx_path, "wb") as f:
+                        f.write(body)
+                    
+                    csv_path = os.path.join(COMMENTS_FOLDER, f"{pkey_project}.csv")
+                    success = convert_xlsx_to_csv(temp_xlsx_path, csv_path)
+                    
+                    if success:
+                        # Update progress and show ETA
                         progress = progress_tracker.increment(success=True)
-
-                        if (
-                            VERBOSE_OUTPUT or
-                            progress["completed"] % PROGRESS_INTERVAL == 0
-                        ):
-                            eta_str = format_time_estimate(
-                                progress["eta_seconds"]
-                            )
-
-                            log(
-                                f"  ✓ [{progress['completed']}/"
-                                f"{progress['total']}] "
-                                f"{pkey_project}: "
-                                f"{project_name[:40]} "
-                                f"(No comments; ETA: {eta_str})",
-                                force=True
-                            )
-
+                        
+                        if VERBOSE_OUTPUT or (progress['completed'] % PROGRESS_INTERVAL == 0):
+                            eta_str = format_time_estimate(progress['eta_seconds'])
+                            log(f"  ✓ [{progress['completed']}/{progress['total']}] {pkey_project}: {project_name[:40]} (ETA: {eta_str})", force=True)
+                        
                         return {
-                            "PKEYPROJECT": pkey_project,
-                            "PROJECTID": project_id,
-                            "PROJECTNAME": project_name,
-                            "STATUS": "SUCCESS",
-                            "MESSAGE": "No comments found (Empty project)",
-                            "ATTEMPTS": attempt + 1,
-                            "TIMESTAMP": datetime.now().strftime(
-                                "%Y-%m-%d %H:%M:%S"
-                            )
+                            'PKEYPROJECT': pkey_project,
+                            'PROJECTID': project_id,
+                            'PROJECTNAME': project_name,
+                            'STATUS': 'SUCCESS',
+                            'MESSAGE': 'Downloaded via Request API',
+                            'ATTEMPTS': attempt + 1,
+                            'TIMESTAMP': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         }
-
-                    # Save diagnostics if the report link never appears.
-                    timeout_html_path = os.path.join(
-                        LOGS_FOLDER,
-                        f"comments_link_timeout_{pkey_project}.html"
-                    )
-
-                    timeout_screenshot_path = os.path.join(
-                        LOGS_FOLDER,
-                        f"comments_link_timeout_{pkey_project}.png"
-                    )
-
-                    try:
-                        with open(
-                            timeout_html_path,
-                            "w",
-                            encoding="utf-8"
-                        ) as debug_file:
-                            debug_file.write(await page.content())
-
-                        await page.screenshot(
-                            path=timeout_screenshot_path,
-                            full_page=True
-                        )
-                    except Exception:
-                        pass
-
-                    raise Exception(
-                        "Timed out waiting for ProjNet to display the "
-                        "comments-report download link."
-                    )
-
-                # ============================================================
-                # 4. Capture details of the generated link.
-                # ============================================================
-                report_link = page.locator(download_selector).first
-
-                raw_href = await report_link.get_attribute("href")
-
-                link_html = await report_link.evaluate(
-                    "(element) => element.outerHTML"
-                )
-
-                if not raw_href:
-                    raise Exception(
-                        "ProjNet displayed a report link, but it did not "
-                        "contain an href."
-                    )
-
-                download_url = normalize_comments_download_url(raw_href)
-
-                link_html_path = os.path.join(
-                    LOGS_FOLDER,
-                    f"comments_download_link_{pkey_project}.html"
-                )
-
-                try:
-                    with open(
-                        link_html_path,
-                        "w",
-                        encoding="utf-8"
-                    ) as debug_file:
-                        debug_file.write(link_html)
-                except Exception:
-                    pass
-
-                log(
-                    f"    [{pkey_project}] Raw href: {raw_href}",
-                    force=True
-                )
-
-                log(
-                    f"    [{pkey_project}] Download URL: {download_url}",
-                    force=True
-                )
-
-                log(
-                    f"    [{pkey_project}] Link HTML saved: "
-                    f"{link_html_path}",
-                    force=True
-                )
-
-                # ============================================================
-                # 5. Fetch the file from the authenticated report page.
-                #
-                # A request made by the page retains the browser session and
-                # report-page context, while avoiding top-level navigation that
-                # Menlo turns into a preview tab.
-                # ============================================================
-                temp_xlsx_path = os.path.join(
-                    COMMENTS_FOLDER,
-                    f"{pkey_project}_temp.xlsx"
-                )
-
-                csv_path = os.path.join(
-                    COMMENTS_FOLDER,
-                    f"{pkey_project}.csv"
-                )
-
-                log(
-                    f"    [{pkey_project}] Fetching generated report "
-                    "before browser navigation...",
-                    force=True
-                )
-
-                report_bytes = await fetch_report_bytes(
-                    page,
-                    report_link,
-                    download_url,
-                    pkey_project
-                )
-
-                if not report_bytes:
-                    raise Exception("In-page report fetch returned an empty file.")
-
-                with open(temp_xlsx_path, "wb") as report_file:
-                    report_file.write(report_bytes)
-
-                downloaded_size = os.path.getsize(temp_xlsx_path)
-
-                log(
-                    f"    [{pkey_project}] Report fetched before Menlo "
-                    f"preview ({downloaded_size:,} bytes)",
-                    force=True
-                )
-
-                success = convert_xlsx_to_csv(
-                    temp_xlsx_path,
-                    csv_path
-                )
-
-                if not success:
-                    raise Exception(
-                        "In-page report fetch completed, but XLSX-to-CSV "
-                        "conversion failed."
-                    )
-
-                progress = progress_tracker.increment(success=True)
-
-                if (
-                    VERBOSE_OUTPUT or
-                    progress["completed"] % PROGRESS_INTERVAL == 0
-                ):
-                    eta_str = format_time_estimate(progress["eta_seconds"])
-
-                    log(
-                        f"  ✓ [{progress['completed']}/"
-                        f"{progress['total']}] "
-                        f"{pkey_project}: "
-                        f"{project_name[:40]} "
-                        f"(ETA: {eta_str})",
-                        force=True
-                    )
-
-                return {
-                    "PKEYPROJECT": pkey_project,
-                    "PROJECTID": project_id,
-                    "PROJECTNAME": project_name,
-                    "STATUS": "SUCCESS",
-                    "MESSAGE": "Fetched report before Menlo preview",
-                    "ATTEMPTS": attempt + 1,
-                    "TIMESTAMP": datetime.now().strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-                }
-
-                # ============================================================
-                # 6. Fallback browser click diagnostics.
-                # ============================================================
-                log(
-                    f"    [{pkey_project}] Clicking generated report link "
-                    "using normal browser behavior...",
-                    force=True
-                )
-
-                download_event = None
-                initial_page_count = len(context.pages)
-
-                try:
-                    async with page.expect_download(timeout=15000) as download_info:
-                        await report_link.click()
-
-                    download_event = await download_info.value
-
-                except Exception:
-                    # This is expected when the link opens a preview/new tab
-                    # rather than triggering Chromium's native download event.
-                    pass
-
-                # Allow a popup/new tab to finish opening after the click.
-                await page.wait_for_timeout(3000)
-
-                # ============================================================
-                # 7. Handle a normal browser download.
-                # ============================================================
-                if download_event:
-                    temp_xlsx_path = os.path.join(
-                        COMMENTS_FOLDER,
-                        f"{pkey_project}_temp.xlsx"
-                    )
-
-                    csv_path = os.path.join(
-                        COMMENTS_FOLDER,
-                        f"{pkey_project}.csv"
-                    )
-
-                    await download_event.save_as(temp_xlsx_path)
-
-                    if not os.path.exists(temp_xlsx_path):
-                        raise Exception(
-                            "Playwright reported a browser download, but the "
-                            "temporary XLSX file was not created."
-                        )
-
-                    downloaded_size = os.path.getsize(temp_xlsx_path)
-
-                    if downloaded_size == 0:
-                        raise Exception(
-                            "The browser download completed but the XLSX file "
-                            "was empty."
-                        )
-
-                    log(
-                        f"    [{pkey_project}] Browser download received: "
-                        f"{download_event.suggested_filename} "
-                        f"({downloaded_size:,} bytes)",
-                        force=True
-                    )
-
-                    success = convert_xlsx_to_csv(
-                        temp_xlsx_path,
-                        csv_path
-                    )
-
-                    if not success:
-                        raise Exception(
-                            "Browser download completed, but XLSX-to-CSV "
-                            "conversion failed."
-                        )
-
-                    progress = progress_tracker.increment(success=True)
-
-                    if (
-                        VERBOSE_OUTPUT or
-                        progress["completed"] % PROGRESS_INTERVAL == 0
-                    ):
-                        eta_str = format_time_estimate(
-                            progress["eta_seconds"]
-                        )
-
-                        log(
-                            f"  ✓ [{progress['completed']}/"
-                            f"{progress['total']}] "
-                            f"{pkey_project}: "
-                            f"{project_name[:40]} "
-                            f"(ETA: {eta_str})",
-                            force=True
-                        )
-
-                    return {
-                        "PKEYPROJECT": pkey_project,
-                        "PROJECTID": project_id,
-                        "PROJECTNAME": project_name,
-                        "STATUS": "SUCCESS",
-                        "MESSAGE": (
-                            "Downloaded through normal browser download event"
-                        ),
-                        "ATTEMPTS": attempt + 1,
-                        "TIMESTAMP": datetime.now().strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        )
-                    }
-
-                # ============================================================
-                # 8. Find and document any tab/window created by the click.
-                # ============================================================
-                current_pages = context.pages
-
-                other_pages = [
-                    current_page
-                    for current_page in current_pages
-                    if current_page != page
-                ]
-
-                if other_pages:
-                    popup_page = other_pages[-1]
-
-                    # Wait briefly for Menlo/preview content and redirects.
-                    try:
-                        await popup_page.wait_for_timeout(3000)
-                    except Exception:
-                        pass
-
-                    popup_url = popup_page.url
-
-                    try:
-                        popup_title = await popup_page.title()
-                    except Exception:
-                        popup_title = "(Unable to read popup title)"
-
-                    popup_html_path = os.path.join(
-                        LOGS_FOLDER,
-                        f"comments_download_popup_{pkey_project}.html"
-                    )
-
-                    popup_screenshot_path = os.path.join(
-                        LOGS_FOLDER,
-                        f"comments_download_popup_{pkey_project}.png"
-                    )
-
-                    popup_diagnostic_path = os.path.join(
-                        LOGS_FOLDER,
-                        f"comments_download_popup_{pkey_project}.json"
-                    )
-
-                    try:
-                        with open(
-                            popup_html_path,
-                            "w",
-                            encoding="utf-8"
-                        ) as debug_file:
-                            debug_file.write(await popup_page.content())
-                    except Exception:
-                        pass
-
-                    try:
-                        await popup_page.screenshot(
-                            path=popup_screenshot_path,
-                            full_page=True
-                        )
-                    except Exception:
-                        pass
-
-                    try:
-                        with open(
-                            popup_diagnostic_path,
-                            "w",
-                            encoding="utf-8"
-                        ) as debug_file:
-                            json.dump(
-                                {
-                                    "pkey_project": pkey_project,
-                                    "project_id": project_id,
-                                    "project_name": project_name,
-                                    "raw_href": raw_href,
-                                    "normalized_download_url": download_url,
-                                    "popup_url": popup_url,
-                                    "popup_title": popup_title,
-                                    "source_page_url": page.url,
-                                    "initial_page_count": initial_page_count,
-                                    "current_page_count": len(current_pages)
-                                },
-                                debug_file,
-                                indent=2
-                            )
-                    except Exception:
-                        pass
-
-                    log(
-                        f"    [{pkey_project}] Browser click opened another "
-                        "tab/window instead of a native download.",
-                        force=True
-                    )
-
-                    log(
-                        f"    [{pkey_project}] Popup URL: {popup_url}",
-                        force=True
-                    )
-
-                    log(
-                        f"    [{pkey_project}] Popup Title: {popup_title}",
-                        force=True
-                    )
-
-                    log(
-                        f"    [{pkey_project}] Popup HTML saved: "
-                        f"{popup_html_path}",
-                        force=True
-                    )
-
-                    log(
-                        f"    [{pkey_project}] Popup screenshot saved: "
-                        f"{popup_screenshot_path}",
-                        force=True
-                    )
-
-                    raise Exception(
-                        "Generated report link opened another browser tab/window "
-                        "instead of producing a Chromium download event. "
-                        f"Popup URL: {popup_url}"
-                    )
-
-                # ============================================================
-                # 9. No native download and no popup.
-                # ============================================================
-                source_page_html_path = os.path.join(
-                    LOGS_FOLDER,
-                    f"comments_download_no_event_{pkey_project}.html"
-                )
-
-                source_page_screenshot_path = os.path.join(
-                    LOGS_FOLDER,
-                    f"comments_download_no_event_{pkey_project}.png"
-                )
-
-                try:
-                    with open(
-                        source_page_html_path,
-                        "w",
-                        encoding="utf-8"
-                    ) as debug_file:
-                        debug_file.write(await page.content())
-
-                    await page.screenshot(
-                        path=source_page_screenshot_path,
-                        full_page=True
-                    )
-                except Exception:
-                    pass
-
-                raise Exception(
-                    "Generated report link click produced neither a browser "
-                    "download event nor another tab/window. "
-                    f"Page HTML saved to: {source_page_html_path}"
-                )
-
+                    else:
+                        raise Exception("Failed to convert Excel to CSV")
+                else:
+                    raise Exception(f"Request failed with status {response.status}")
+                
             except Exception as e:
                 error_msg = str(e)
-
-                # If a partial XLSX was created, remove it before retrying.
-                if temp_xlsx_path and os.path.exists(temp_xlsx_path):
-                    try:
-                        os.remove(temp_xlsx_path)
-                    except Exception:
-                        pass
-
+                
+                # If this was the last attempt, log the failure
                 if attempt == MAX_RETRIES - 1:
                     progress = progress_tracker.increment(success=False)
-
-                    eta_str = format_time_estimate(
-                        progress["eta_seconds"]
-                    )
-
-                    log(
-                        f"  ✗ [{progress['completed']}/"
-                        f"{progress['total']}] "
-                        f"{pkey_project}: FAILED after "
-                        f"{MAX_RETRIES} attempts - "
-                        f"{error_msg[:300]} "
-                        f"(ETA: {eta_str})",
-                        force=True
-                    )
-
+                    eta_str = format_time_estimate(progress['eta_seconds'])
+                    log(f"  ✗ [{progress['completed']}/{progress['total']}] {pkey_project}: FAILED after {MAX_RETRIES} attempts - {error_msg[:60]}", force=True)
+                    
                     return {
-                        "PKEYPROJECT": pkey_project,
-                        "PROJECTID": project_id,
-                        "PROJECTNAME": project_name,
-                        "STATUS": "ERROR",
-                        "MESSAGE": (
-                            f"Failed after {MAX_RETRIES} attempts: "
-                            f"{error_msg}"
-                        ),
-                        "ATTEMPTS": MAX_RETRIES,
-                        "TIMESTAMP": datetime.now().strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        )
+                        'PKEYPROJECT': pkey_project,
+                        'PROJECTID': project_id,
+                        'PROJECTNAME': project_name,
+                        'STATUS': 'ERROR',
+                        'MESSAGE': f'Failed after {MAX_RETRIES} attempts: {error_msg}',
+                        'ATTEMPTS': MAX_RETRIES,
+                        'TIMESTAMP': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     }
-
-                if VERBOSE_OUTPUT:
-                    log(
-                        f"    ⚠ [{pkey_project}] Attempt "
-                        f"{attempt + 1}/{MAX_RETRIES} failed: "
-                        f"{error_msg[:300]}. "
-                        f"Retrying in {RETRY_DELAY} seconds...",
-                        force=True
-                    )
-
-                await asyncio.sleep(RETRY_DELAY)
-
+                else:
+                    # Wait before retrying
+                    await asyncio.sleep(RETRY_DELAY)
+                    continue
+            
             finally:
-                for event_name, handler in network_handlers:
-                    try:
-                        context.remove_listener(event_name, handler)
-                    except Exception:
-                        pass
-
-                if network_body_tasks:
-                    await asyncio.gather(
-                        *network_body_tasks,
-                        return_exceptions=True
-                    )
-
-                if network_capture_start is not None:
-                    write_network_log(network_log_path, network_events)
-
-                if popup_page:
-                    try:
-                        await popup_page.close()
-                    except Exception:
-                        pass
-
                 if page:
                     try:
                         await page.close()
-                    except Exception:
+                    except:
                         pass
-
-
-
 
 # ============================================================================
 # ASYNC MAIN FUNCTION FOR MULTI-TAB DOWNLOADS
 # ============================================================================
 
 async def download_all_comments_async(browser, projects_to_download, start_time):
-    """Download all comments using multiple tabs in the same browser."""
+    """
+    Download all comments using multiple tabs in the same browser.
+    """
+    # Get the existing context (already logged in)
     contexts = browser.contexts
     if len(contexts) == 0:
         raise Exception("No browser context found")
     
     context = contexts[0]
+    
+    # Create semaphore to limit concurrent tabs
     semaphore = asyncio.Semaphore(MAX_PARALLEL_TABS)
+    
+    # Create progress tracker
     progress_tracker = ProgressTracker(len(projects_to_download), start_time)
     
+    # Create tasks for all projects
     tasks = []
     for idx, project in enumerate(projects_to_download):
         tab_id = idx % MAX_PARALLEL_TABS
         task = download_single_project_async(context, project, tab_id, semaphore, progress_tracker)
         tasks.append(task)
     
+    # Run all tasks concurrently
     results = await asyncio.gather(*tasks)
+    
     return results
 
 # ============================================================================
@@ -1378,15 +577,18 @@ def login_sync(page, username, password):
     log("→ Navigating to login page...", force=True)
     page.goto(LOGIN_URL, timeout=PAGE_LOAD_TIMEOUT)
     
+    # --- CAC AUTHENTICATION WAIT ---
     log("→ WAITING FOR CAC/ADFS AUTHENTICATION...", force=True)
     log("  Please select your certificate and enter your PIN in the browser window.", force=True)
     
     try:
+        # Wait up to 5 minutes (300,000ms) for the ProjNet email field to appear
         page.wait_for_selector("#email", timeout=300000)
         log("✓ Authentication detected, proceeding with login...", force=True)
     except Exception as e:
         log("✗ Timeout waiting for login page. Did CAC authentication fail?", force=True)
         raise e
+    # -------------------------------
 
     log("→ Entering username...", force=True)
     page.fill("#email", username)
@@ -1395,6 +597,7 @@ def login_sync(page, username, password):
     page.fill("#password", password)
     
     log("→ Accepting terms and conditions...", force=True)
+    # Fix for the checkbox error from the previous step:
     if not page.is_checked("#terms0"):
         page.click("#terms0")
     
@@ -1402,6 +605,7 @@ def login_sync(page, username, password):
     page.click("#signin_submit")
     
     page.wait_for_load_state("networkidle", timeout=PAGE_LOAD_TIMEOUT)
+    
     log("✓ Login successful!", force=True)
     log("=" * 80 + "\n", force=True)
 
@@ -1413,23 +617,29 @@ def download_all_projects_report_sync(page):
     log("→ Navigating to report page...", force=True)
     page.goto(ALL_PROJECTS_REPORT_URL, timeout=PAGE_LOAD_TIMEOUT)
     
+    # Wait for the link to appear
     selector = 'a[href*="AllProjects_AllReviews"]'
     page.wait_for_selector(selector, state="visible", timeout=60000)
     
+    # Use the browser to get the ABSOLUTE URL (handles relative paths correctly)
     full_url = page.evaluate(f'document.querySelector(\'{selector}\').href')
-    log(f"→ Fetching from: {full_url}", force=True)
-    log("→ Downloading file via API to bypass Menlo Preview...", force=True)
     
+    log(f"→ Fetching from: {full_url}", force=True)
+    log(f"→ Downloading file via API to bypass Menlo Preview...", force=True)
+    
+    # Use the page's request context to download bytes directly
     response = page.request.get(full_url)
+    
     if response.status == 200:
         xlsx_path = os.path.join(DOWNLOAD_FOLDER, "ALL_PROJ_ALL_REVIEW.xlsx")
         with open(xlsx_path, "wb") as f:
             f.write(response.body())
         
-        log("✓ File downloaded successfully", force=True)
+        log(f"✓ File downloaded successfully", force=True)
+        
         csv_path = os.path.join(DOWNLOAD_FOLDER, "ALL_PROJ_ALL_REVIEW.csv")
         convert_xlsx_to_csv(xlsx_path, csv_path)
-        log("✓ Converted to CSV", force=True)
+        log(f"✓ Converted to CSV", force=True)
     else:
         log(f"✗ API Download failed with status: {response.status}", force=True)
         raise Exception(f"Failed to download report via API (Status {response.status})")
@@ -1446,6 +656,8 @@ def download_users_report_sync(page):
     
     log(f"→ Selecting '{SITE_OFFICE_NAME}' from dropdown...", force=True)
     page.select_option('select[name="intPKeySiteOffice"]', value=SITE_OFFICE_VALUE)
+    
+    # Wait for page to react to dropdown selection
     page.wait_for_timeout(1500)
     
     log("→ Selecting 'Users In Site' report type...", force=True)
@@ -1453,47 +665,55 @@ def download_users_report_sync(page):
     
     try:
         page.wait_for_selector(radio_selector, state="visible", timeout=30000)
+        # Use click instead of check to avoid state-change errors
         page.click(radio_selector)
+        # Force check via JS as backup
         page.evaluate(f"document.querySelector('{radio_selector}').checked = true")
     except Exception as e:
         log(f"  ⚠ Radio selection warning: {e}", force=True)
     
+    # Crucial: Wait for the "Go" button to become active/visible after radio selection
     page.wait_for_timeout(1500)
+    
     log("→ Clicking Go button to generate report...", force=True)
     
-    # Targeting the second "Go" button for generating the report
+    # Try a more resilient approach to find the correct "Go" button
+    # There are often two "Go" buttons; we want the one associated with the report type
     try:
+        # Look for all "Go" buttons and click the one that is visible and enabled
         go_buttons = page.locator('input[value="Go"]')
         count = go_buttons.count()
         
-        if count >= 2:
-            log(f"  → Found {count} 'Go' buttons. Clicking button #2 (Report Generator)...", force=True)
-            go_buttons.nth(1).click()
-        elif count == 1:
-            log("  → Found 1 'Go' button. Clicking it...", force=True)
-            go_buttons.nth(0).click()
-        else:
-            log("  → Attempting JavaScript fallback for second Go button...", force=True)
-            page.evaluate("""() => {
-                const btns = document.querySelectorAll('input[value="Go"]');
-                if (btns.length >= 2) btns[1].click();
-                else if (btns.length === 1) btns[0].click();
-                else {
-                    const submitBtn = document.querySelector('input[value="Go"][onclick*="doFormSubmit"]');
-                    if (submitBtn) submitBtn.click();
-                }
-            }""")
+        clicked = False
+        for i in range(count):
+            btn = go_buttons.nth(i)
+            if btn.is_visible() and btn.is_enabled():
+                # The report "Go" button is usually the second one on this page
+                # but we'll try to click the one that works
+                btn.click()
+                clicked = True
+                break
+        
+        if not clicked:
+            # Fallback to a direct JavaScript click if the locator fails
+            log("  → Attempting JavaScript fallback for Go button...", force=True)
+            page.evaluate("document.querySelector('input[value=\"Go\"][onclick*=\"doFormSubmit\"]').click()")
+            
     except Exception as e:
         log(f"  ✗ Error clicking Go button: {e}", force=True)
+        # Final desperate attempt
         page.keyboard.press("Enter")
 
+    # Wait for the report table to appear
     log("→ Waiting for report table to load...", force=True)
     try:
+        # Increase timeout for report generation
         page.wait_for_selector('table.report_table', timeout=90000)
     except Exception as e:
         log(f"  ⚠ Table not found via selector: {e}. Checking page content...", force=True)
     
     page.wait_for_load_state("networkidle")
+    
     log("→ Parsing user data from HTML table...", force=True)
     
     content = page.content()
@@ -1504,6 +724,7 @@ def download_users_report_sync(page):
     
     if not table:
         log("✗ Error: Could not find report_table on page. The report may have failed to generate.", force=True)
+        # Save a debug screenshot if it fails
         page.screenshot(path=os.path.join(LOGS_FOLDER, "debug_users_report_fail.png"))
         return
     
@@ -1512,16 +733,19 @@ def download_users_report_sync(page):
     
     for idx, row in enumerate(rows):
         cells = row.find_all('td')
+        
         if len(cells) >= 7:
             try:
                 id_cell = cells[0]
                 id_link = id_cell.find('a')
                 user_id = id_link.text.strip() if id_link else id_cell.text.strip()
                 
+                # Skip header row
                 if user_id.lower() == 'id' or not user_id:
                     continue
                     
                 name = cells[1].text.strip()
+                
                 email_cell = cells[3]
                 email_link = email_cell.find('a')
                 email = email_link.text.strip() if email_link else email_cell.text.strip()
@@ -1539,6 +763,7 @@ def download_users_report_sync(page):
                     'Site': site,
                     'Status': status
                 })
+                        
             except Exception:
                 continue
     
@@ -1547,6 +772,7 @@ def download_users_report_sync(page):
         return
 
     log(f"→ Successfully extracted {len(users_data)} user records", force=True)
+    
     csv_path = os.path.join(DOWNLOAD_FOLDER, "USERS.csv")
     
     with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
@@ -1569,7 +795,9 @@ def download_all_projects_list_sync(page):
     selector = 'a[href*="USACE-ProjNet_AllProjects_SiteID1107.xls"]'
     page.wait_for_selector(selector, state="visible", timeout=60000)
     
+    # Get absolute URL via browser evaluation
     full_url = page.evaluate(f'document.querySelector(\'{selector}\').href')
+    
     log(f"→ Fetching from: {full_url}", force=True)
     response = page.request.get(full_url)
     
@@ -1583,11 +811,12 @@ def download_all_projects_list_sync(page):
         
         csv_path = os.path.join(DOWNLOAD_FOLDER, "ALL_PROJECTS.csv")
         try:
+            # ProjNet .xls files are often HTML tables; pandas handles this well
             df = pd.read_excel(xls_path)
             df.insert(0, 'FILE_LAST_MODIFIED', file_modified_str)
             df.to_csv(csv_path, index=False, encoding='utf-8')
             os.remove(xls_path)
-            log("✓ CSV file created and original deleted", force=True)
+            log(f"✓ CSV file created and original deleted", force=True)
             return True
         except Exception as e:
             log(f"✗ Error converting Excel to CSV: {e}", force=True)
@@ -1626,7 +855,10 @@ def consolidate_all_comments():
     for idx, filename in enumerate(comment_files):
         pkeyproject = filename.replace('.csv', '')
         file_path = os.path.join(COMMENTS_FOLDER, filename)
+        
         progress = f"[{idx + 1}/{len(comment_files)}]"
+        
+        # Only show progress at intervals unless verbose
         show_progress = VERBOSE_OUTPUT or ((idx + 1) % 100 == 0) or (idx + 1 == len(comment_files))
         
         try:
@@ -1650,6 +882,7 @@ def consolidate_all_comments():
                     all_data.append(blank_row)
                 else:
                     all_data.append({'PKEYPROJECT': pkeyproject})
+                
                 continue
             
             current_columns = list(df.columns)
@@ -1677,12 +910,13 @@ def consolidate_all_comments():
                         'MESSAGE': '; '.join(mismatch_msg),
                         'TIMESTAMP': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     })
+                    
                     continue
             
             df.insert(0, 'PKEYPROJECT', pkeyproject)
             all_data.extend(df.to_dict('records'))
-            processed_count += 1
             
+            processed_count += 1
             if show_progress:
                 log(f"{progress} Processing {filename}... ✓ OK ({len(df)} rows)", force=True)
             
@@ -1704,6 +938,7 @@ def consolidate_all_comments():
                 'MESSAGE': error_msg,
                 'TIMESTAMP': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             })
+            
             continue
     
     if len(all_data) == 0:
@@ -1711,7 +946,7 @@ def consolidate_all_comments():
         log("=" * 80 + "\n", force=True)
         return
     
-    log("\n→ Creating consolidated DataFrame...", force=True)
+    log(f"\n→ Creating consolidated DataFrame...", force=True)
     df_consolidated = pd.DataFrame(all_data)
     
     cols = df_consolidated.columns.tolist()
@@ -1721,7 +956,7 @@ def consolidate_all_comments():
         df_consolidated = df_consolidated[cols]
     
     output_path = os.path.join(DOWNLOAD_FOLDER, 'ALL_COMMENTS.csv')
-    log("→ Saving consolidated file...", force=True)
+    log(f"→ Saving consolidated file...", force=True)
     df_consolidated.to_csv(output_path, index=False, encoding='utf-8')
     
     log(f"✓ Consolidated file saved: {output_path}", force=True)
@@ -1732,7 +967,7 @@ def consolidate_all_comments():
         log_filename = f"consolidation_log_{timestamp_str}.csv"
         log_path = os.path.join(LOGS_FOLDER, log_filename)
         
-        log("→ Saving consolidation log...", force=True)
+        log(f"→ Saving consolidation log...", force=True)
         df_log = pd.DataFrame(consolidation_log)
         df_log.to_csv(log_path, index=False, encoding='utf-8')
         log(f"✓ Consolidation log saved: {log_path}", force=True)
@@ -1793,10 +1028,11 @@ def upload_files_to_sharepoint(context):
             
             file_size = os.path.getsize(file_path)
             file_size_mb = file_size / (1024 * 1024)
+            
             log(f"\n[{idx + 1}/{len(files_to_upload)}] Uploading {filename} ({file_size_mb:.2f} MB)...", force=True)
             
             if file_size_mb > 100:
-                log("  ⚠ Large file detected - this may take several minutes...", force=True)
+                log(f"  ⚠ Large file detected - this may take several minutes...", force=True)
             
             try:
                 upload_successful = upload_to_sharepoint(
@@ -1815,6 +1051,7 @@ def upload_files_to_sharepoint(context):
                         'message': 'Uploaded successfully'
                     })
                     successful_uploads += 1
+                    
                     if file_size_mb > 100:
                         sp_page.wait_for_timeout(10000)
                 else:
@@ -1884,7 +1121,6 @@ def main():
     log(f"Verbose Output: {'ENABLED' if VERBOSE_OUTPUT else f'DISABLED (showing every {PROGRESS_INTERVAL} projects)'}", force=True)
     log(f"Headless Mode (initial downloads): {'ENABLED' if HEADLESS_INITIAL_DOWNLOADS else 'DISABLED'}", force=True)
     log(f"Headless Mode (comments download): {'ENABLED' if HEADLESS_COMMENTS_DOWNLOAD else 'DISABLED'}", force=True)
-    log(f"Initial Downloads: " f"{'SKIPPED - using existing files' if SKIP_INITIAL_DOWNLOADS else 'ENABLED'}",    force=True)
     log(f"SharePoint Upload: ALWAYS VISIBLE (not configurable)", force=True)
     log(f"Date Filter: Projects within last {YEARS_TO_INCLUDE} years", force=True)
     log("=" * 80, force=True)
@@ -1897,89 +1133,36 @@ def main():
     
     username, password = get_credentials()
     
-       # PHASE 1: Initial downloads using sync API
-    #
-    # During comments-download testing, this can be skipped. Phase 2 uses the
-    # previously downloaded ALL_PROJECTS.csv already in DOWNLOAD_FOLDER.
-    all_projects_csv = os.path.join(DOWNLOAD_FOLDER, "ALL_PROJECTS.csv")
-
-    if SKIP_INITIAL_DOWNLOADS:
-        log(
-            "→ Phase 1: SKIPPED - using existing initial download files",
-            force=True
-        )
-
-        if not os.path.exists(all_projects_csv):
-            raise FileNotFoundError(
-                "SKIP_INITIAL_DOWNLOADS is True, but the required file was "
-                f"not found:\n{all_projects_csv}\n\n"
-                "Set SKIP_INITIAL_DOWNLOADS = False to regenerate it, or "
-                "place a valid ALL_PROJECTS.csv in the downloads folder."
-            )
-
-        file_modified_time = datetime.fromtimestamp(
-            os.path.getmtime(all_projects_csv)
-        ).strftime("%Y-%m-%d %H:%M:%S")
-
-        log(
-            f"✓ Found existing ALL_PROJECTS.csv "
-            f"(last modified: {file_modified_time})",
-            force=True
-        )
-
-    else:
-        initial_start = datetime.now()
-
-        log(
-            "→ Phase 1: Initial downloads (estimated: ~2 minutes)",
-            force=True
-        )
-
-        with sync_pw() as p:
-            log(
-                f"→ Launching browser "
-                f"(headless={HEADLESS_INITIAL_DOWNLOADS}) "
-                f"for initial downloads...",
-                force=True
-            )
-
-            browser = p.chromium.launch(
-                headless=HEADLESS_INITIAL_DOWNLOADS,
-                args=["--no-proxy-server"] if BYPASS_SYSTEM_PROXY else []
-            )
-
-            context = browser.new_context(accept_downloads=True)
-            page = context.new_page()
-
-            try:
-                login_sync(page, username, password)
-                download_all_projects_report_sync(page)
-                download_users_report_sync(page)
-                download_all_projects_list_sync(page)
-
-                page.close()
-                browser.close()
-
-                initial_elapsed = (
-                    datetime.now() - initial_start
-                ).total_seconds()
-
-                log(
-                    f"✓ Phase 1 completed in "
-                    f"{format_elapsed_time(initial_elapsed)}",
-                    force=True
-                )
-
-            except Exception as e:
-                log(
-                    f"✗ Error in initial downloads: {e}",
-                    force=True
-                )
-
-                browser.close()
-                raise
+    # PHASE 1: Initial downloads using sync API
+    initial_start = datetime.now()
+    log(f"→ Phase 1: Initial downloads (estimated: ~2 minutes)", force=True)
+    
+    with sync_pw() as p:
+        log(f"→ Launching browser (headless={HEADLESS_INITIAL_DOWNLOADS}) for initial downloads...", force=True)
+        
+        browser = p.chromium.launch(headless=HEADLESS_INITIAL_DOWNLOADS)
+        context = browser.new_context(accept_downloads=True)
+        page = context.new_page()
+        
+        try:
+            login_sync(page, username, password)
+            download_all_projects_report_sync(page)
+            download_users_report_sync(page)
+            download_all_projects_list_sync(page)
+            
+            page.close()
+            browser.close()
+            
+            initial_elapsed = (datetime.now() - initial_start).total_seconds()
+            log(f"✓ Phase 1 completed in {format_elapsed_time(initial_elapsed)}", force=True)
+            
+        except Exception as e:
+            log(f"✗ Error in initial downloads: {e}", force=True)
+            browser.close()
+            raise
     
     # PHASE 2: Analyze projects
+    all_projects_csv = os.path.join(DOWNLOAD_FOLDER, "ALL_PROJECTS.csv")
     df_projects = pd.read_csv(all_projects_csv)
     
     # Map column names
@@ -2039,6 +1222,7 @@ def main():
     
     # PHASE 3: Multi-tab downloads using async API
     if len(projects_to_download) > 0:
+        # Calculate estimate
         estimated_seconds = (len(projects_to_download) / MAX_PARALLEL_TABS) * AVG_SECONDS_PER_PROJECT
         estimated_str = format_time_estimate(estimated_seconds)
         
@@ -2056,22 +1240,23 @@ def main():
         async def run_async_downloads():
             async with async_playwright() as p:
                 log(f"→ Launching browser (headless={HEADLESS_COMMENTS_DOWNLOAD})...", force=True)
-                browser = await p.chromium.launch(
-                    headless=HEADLESS_COMMENTS_DOWNLOAD,
-                    args=["--no-proxy-server"] if BYPASS_SYSTEM_PROXY else []
-                )
+                browser = await p.chromium.launch(headless=HEADLESS_COMMENTS_DOWNLOAD)
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
                 
+                # Login once
                 log("→ Logging in...", force=True)
                 await page.goto(LOGIN_URL, timeout=PAGE_LOAD_TIMEOUT)
-                
+
+                # --- CAC AUTHENTICATION WAIT (ASYNC) ---
                 log("→ WAITING FOR CAC/ADFS AUTHENTICATION...", force=True)
                 await page.wait_for_selector("#email", timeout=300000)
-                
+                # ---------------------------------------
+
                 await page.fill("#email", username)
                 await page.fill("#password", password)
                 
+                # Checkbox fix
                 if not await page.is_checked("#terms0"):
                     await page.click("#terms0")
                     
@@ -2080,21 +1265,28 @@ def main():
                 await page.close()
                 
                 log("✓ Login successful - session established", force=True)
+                # ... rest of the function
                 log(f"→ Starting download of {len(projects_to_download)} projects...", force=True)
                 log("=" * 80, force=True)
                 
+                # Download all projects using multiple tabs
                 results = await download_all_comments_async(browser, projects_to_download, start_time)
+                
                 await browser.close()
+                
                 return results
         
+        # Run the async downloads
         log_data = asyncio.run(run_async_downloads())
         
         end_time = datetime.now()
         elapsed_time = (end_time - start_time).total_seconds()
         
+        # Count results
         downloaded_count = sum(1 for r in log_data if r['STATUS'] == 'SUCCESS')
         error_count = sum(1 for r in log_data if r['STATUS'] == 'ERROR')
         
+        # Add skipped projects to log
         for project in projects_to_skip:
             log_data.append({
                 'PKEYPROJECT': project['PKEYPROJECT'],
@@ -2106,6 +1298,7 @@ def main():
                 'TIMESTAMP': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             })
         
+        # Save log
         timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
         log_filename = f"comments_download_{timestamp_str}.csv"
         log_path = os.path.join(LOGS_FOLDER, log_filename)
@@ -2120,7 +1313,7 @@ def main():
         log(f"  ✓ Successfully downloaded: {downloaded_count}", force=True)
         log(f"  → Skipped (up to date): {len(projects_to_skip)}", force=True)
         log(f"  ✗ Failed (after {MAX_RETRIES} attempts): {error_count}", force=True)
-        log("\nPerformance:", force=True)
+        log(f"\nPerformance:", force=True)
         log(f"  Total time: {format_elapsed_time(elapsed_time)}", force=True)
         log(f"  Average time per project: {elapsed_time / len(projects_to_download):.2f} seconds", force=True)
         log(f"  Parallel tabs used: {MAX_PARALLEL_TABS}", force=True)
@@ -2132,6 +1325,7 @@ def main():
         
         log("=" * 80 + "\n", force=True)
         
+        # Consolidate
         if downloaded_count > 0:
             log("→ Phase 3: Consolidating comment files...", force=True)
             consolidate_all_comments()
@@ -2148,9 +1342,11 @@ def main():
         
         try:
             upload_files_to_sharepoint(context)
+            
             log("\n" + "=" * 80, force=True)
             log("✓ ALL TASKS COMPLETED SUCCESSFULLY!", force=True)
             log("=" * 80 + "\n", force=True)
+            
         finally:
             browser.close()
 
